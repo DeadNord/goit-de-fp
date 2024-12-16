@@ -1,3 +1,4 @@
+import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json,
@@ -16,17 +17,57 @@ from pyspark.sql.types import (
 )
 
 # Доступи до MySQL (Етап 1 - читання даних із MySQL)
+# Абсолютный путь к MySQL JAR
+mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
+if not os.path.exists(mysql_jar_path):
+    raise FileNotFoundError(
+        f"MySQL connector JAR not found at {mysql_jar_path}. "
+        "Please download it using:\n"
+        "wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.32/mysql-connector-j-8.0.32.jar"
+    )
+
+# Установка переменной окружения для Kafka пакетов
+os.environ["PYSPARK_SUBMIT_ARGS"] = (
+    "--packages org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.1,"
+    "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 "
+    "pyspark-shell"
+)
+
+# Создание SparkSession
+spark = (
+    SparkSession.builder.config("spark.jars", mysql_jar_path)
+    .config("spark.driver.extraClassPath", mysql_jar_path)
+    .config("spark.executor.extraClassPath", mysql_jar_path)
+    .config("spark.sql.streaming.checkpointLocation", "./checkpoint")
+    .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
+    .config("spark.driver.memory", "2g")  # Увеличение памяти
+    .config("spark.executor.memory", "2g")
+    .appName("EnhancedJDBCToKafka")
+    .master("local[*]")  # Локальное тестирование
+    .getOrCreate()
+)
+
+# Проверка, что драйвер MySQL загружен
+try:
+    spark.sparkContext._jvm.Class.forName("com.mysql.cj.jdbc.Driver")
+    print("MySQL driver successfully loaded")
+except Exception as e:
+    print(f"Failed to load MySQL driver: {e}")
+    raise
+
+spark.sparkContext.setLogLevel("WARN")
+
+
 jdbc_url = "jdbc:mysql://217.61.57.46:3306/olympic_dataset"
 jdbc_user = "neo_data_admin"
 jdbc_password = "Proyahaxuqithab9oplp"
 athlete_bio_table = "athlete_bio"
 athlete_event_table = "athlete_event_results"
 
-# Доступи до Kafka
 kafka_bootstrap_servers = "77.81.230.104:9092"
 kafka_sasl_jaas = 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="VawEzo1ikLtrA8Ug8THa";'
-input_topic = "athlete_event_results"  # Топік для вхідних даних результатів змагань
-output_topic = "athlete_enriched"  # Топік для вихідних агрегованих даних
+input_topic = "athlete_event_results"
+output_topic = "athlete_enriched"
 
 spark = (
     SparkSession.builder.appName("EndToEndStreaming_Debug")
@@ -37,6 +78,11 @@ spark = (
 spark.sparkContext.setLogLevel("WARN")
 
 print("----- Етап 1: Зчитування біоданих з MySQL -----")
+
+print("Проверка соединения с MySQL:")
+print(f"URL: {jdbc_url}")
+print(f"Таблица: {athlete_bio_table}")
+
 df_bio = (
     spark.read.format("jdbc")
     .options(
@@ -45,6 +91,8 @@ df_bio = (
         dbtable=athlete_bio_table,
         user=jdbc_user,
         password=jdbc_password,
+        fetchsize="1000",  # Размер выборки
+        queryTimeout="30",  # Таймаут в секундах
     )
     .load()
 )
@@ -172,6 +220,12 @@ print("Етап 5: Агрегація готова. Дані будуть зап
 
 
 def foreach_batch_function(batch_df, batch_id):
+    if batch_df.isEmpty():
+        print(
+            f"--- foreach_batch_function called for batch_id: {batch_id}, but batch is empty. Skipping. ---"
+        )
+        return
+
     print(f"--- foreach_batch_function called for batch_id: {batch_id} ---")
     print("Дані batch_df (перші 5 рядків):")
     batch_df.show(5, truncate=False)
