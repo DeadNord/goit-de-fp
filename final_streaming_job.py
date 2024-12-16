@@ -40,8 +40,8 @@ spark = (
     .config("spark.executor.extraClassPath", mysql_jar_path)
     .config("spark.sql.streaming.checkpointLocation", "./checkpoint")
     .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
-    .config("spark.driver.memory", "2g")  # Увеличение памяти
-    .config("spark.executor.memory", "2g")
+    .config("spark.driver.memory", "4g")  # Увеличение памяти
+    .config("spark.executor.memory", "4g")
     .appName("EnhancedJDBCToKafka")
     .master("local[*]")  # Локальное тестирование
     .getOrCreate()
@@ -83,19 +83,34 @@ print("Проверка соединения с MySQL:")
 print(f"URL: {jdbc_url}")
 print(f"Таблица: {athlete_bio_table}")
 
-df_bio = (
-    spark.read.format("jdbc")
-    .options(
-        url=jdbc_url,
-        driver="com.mysql.cj.jdbc.Driver",
-        dbtable=athlete_bio_table,
-        user=jdbc_user,
-        password=jdbc_password,
-        fetchsize="1000",  # Размер выборки
-        queryTimeout="30",  # Таймаут в секундах
+try:
+    spark.sparkContext._jvm.Class.forName("com.mysql.cj.jdbc.Driver")
+    print("MySQL драйвер загружен успешно")
+except Exception as e:
+    print(f"Ошибка загрузки драйвера: {e}")
+
+print("Проверяем доступ к таблице athlete_bio...")
+
+try:
+    df_bio = (
+        spark.read.format("jdbc")
+        .options(
+            url=jdbc_url,
+            driver="com.mysql.cj.jdbc.Driver",
+            dbtable=athlete_bio_table,
+            user=jdbc_user,
+            password=jdbc_password,
+            fetchsize="5000",  # Размер выборки
+            queryTimeout="60",  # Таймаут в секундах
+            numPartitions="10",
+        )
+        .load()
     )
-    .load()
-)
+    print("Доступ к таблице подтвержден")
+except Exception as e:
+    print(f"Ошибка подключения к MySQL: {e}")
+    raise
+
 df_bio.show(10, truncate=False)
 
 print("----- Перевірка event даних з MySQL -----")
