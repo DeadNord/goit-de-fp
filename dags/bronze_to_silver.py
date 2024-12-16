@@ -1,5 +1,3 @@
-# bronze_to_silver.py
-
 # Етап 2 (Частина 2): Читання з bronze, чистка тексту, дедублікація, запис у silver
 
 from pyspark.sql import SparkSession

@@ -1,5 +1,3 @@
-# silver_to_gold.py
-
 # Етап 3 (Частина 2): Читання з silver, джоін двох таблиць, агрегація, добавлення timestamp, запис у gold
 
 from pyspark.sql import SparkSession

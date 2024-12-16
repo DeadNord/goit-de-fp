@@ -1,5 +1,3 @@
-# landing_to_bronze.py
-
 # Етап 1 (Частина 2): Завантаження даних з FTP у landing, читання в Spark та запис у bronze
 
 import requests
