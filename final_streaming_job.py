@@ -86,9 +86,21 @@ class SparkProcessor:
 
         self.spark = self._create_spark_session()
 
+        # Clean the checkpoint directory
+        self._clean_checkpoint_dir()
+
+    def _clean_checkpoint_dir(self):
+        """Clean checkpoint directory."""
+        checkpoint_dir = "./checkpoint"
+        if os.path.exists(checkpoint_dir):
+            import shutil
+
+            shutil.rmtree(checkpoint_dir)
+            logger.info(f"Checkpoint directory '{checkpoint_dir}' cleared.")
+
     def _load_kafka_config(self) -> KafkaConfig:
         """Load Kafka configuration from environment variables."""
-        return KafkaConfig(
+        config = KafkaConfig(
             bootstrap_servers=os.getenv(
                 "KAFKA_BOOTSTRAP_SERVERS", "77.81.230.104:9092"
             ),
@@ -99,6 +111,8 @@ class SparkProcessor:
             input_topic=os.getenv("KAFKA_INPUT_TOPIC", "athlete_event_results"),
             output_topic=os.getenv("KAFKA_OUTPUT_TOPIC", "athlete_enriched"),
         )
+        logger.info(f"Kafka Bootstrap Servers: {config.bootstrap_servers}")
+        return config
 
     def _load_mysql_config(self) -> MySQLConfig:
         """Load MySQL configuration from environment variables."""
@@ -136,7 +150,15 @@ class SparkProcessor:
         )
 
     def write_to_kafka(self, df: DataFrame, topic: str) -> None:
-        """Write DataFrame to Kafka."""
+        """Write DataFrame to Kafka with validation."""
+        if not self.kafka_config.bootstrap_servers:
+            raise ValueError(
+                "Kafka Bootstrap Servers is not set. Check environment variables."
+            )
+
+        logger.info(f"Writing to Kafka topic: {topic}")
+        logger.info(f"Kafka Bootstrap Servers: {self.kafka_config.bootstrap_servers}")
+
         df.select(
             to_json(struct([col(c) for c in df.columns])).alias("value")
         ).write.format("kafka").options(
@@ -189,7 +211,6 @@ class SparkProcessor:
             .foreachBatch(self._foreach_batch_function)
             .start()
         )
-
         query.awaitTermination()
 
     def _foreach_batch_function(self, batch_df: DataFrame, batch_id: int) -> None:
