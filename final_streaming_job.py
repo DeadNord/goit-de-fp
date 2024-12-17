@@ -1,7 +1,6 @@
 import os
 import logging
 from dataclasses import dataclass
-from typing import List
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
     avg,
@@ -16,7 +15,6 @@ from pyspark.sql.types import (
     StructField,
     StringType,
     IntegerType,
-    FloatType,
 )
 
 # Configure logging
@@ -162,11 +160,13 @@ class SparkProcessor:
         df.select(
             to_json(struct([col(c) for c in df.columns])).alias("value")
         ).write.format("kafka").options(
-            kafka_bootstrap_servers=self.kafka_config.bootstrap_servers,
-            kafka_sasl_jaas_config=self.kafka_config.sasl_jaas_config,
-            kafka_security_protocol=self.kafka_config.security_protocol,
-            kafka_sasl_mechanism=self.kafka_config.sasl_mechanism,
-            topic=topic,
+            **{
+                "kafka.bootstrap.servers": self.kafka_config.bootstrap_servers,
+                "kafka.sasl.jaas.config": self.kafka_config.sasl_jaas_config,
+                "kafka.security.protocol": self.kafka_config.security_protocol,
+                "kafka.sasl.mechanism": self.kafka_config.sasl_mechanism,
+                "topic": topic,
+            }
         ).save()
 
     def process_stream(self) -> None:
