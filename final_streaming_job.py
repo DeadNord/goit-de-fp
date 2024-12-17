@@ -88,7 +88,7 @@ class SparkProcessor:
     def __init__(self):
         self.kafka_config = self._load_kafka_config()
         self.mysql_config = self._load_mysql_config()
-        self.checkpoint_dir = "./checkpoint"
+        # self.checkpoint_dir = "./checkpoint"
 
         logger.info("Loaded Kafka Configuration:")
         logger.info(vars(self.kafka_config))
@@ -96,7 +96,13 @@ class SparkProcessor:
         logger.info("Loaded MySQL Configuration:")
         logger.info(vars(self.mysql_config))
 
-        self.spark = self._create_spark_session()
+        logger.info("Creating Spark Session...")
+        try:
+            self.spark = self._create_spark_session()
+            logger.info("Spark Session created successfully!")
+        except Exception as e:
+            logger.error(f"Failed to create Spark Session: {e}")
+            raise
 
         # # Clean the checkpoint directory
         # self._clean_checkpoint_dir()
@@ -145,24 +151,40 @@ class SparkProcessor:
             )
 
         # Интеграция параметров Spark Submit
+        kafka_packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
         os.environ["PYSPARK_SUBMIT_ARGS"] = (
-            f"--jars {mysql_jar_path} "
-            "--packages org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.3,"
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 "
-            "pyspark-shell"
+            f"--jars {mysql_jar_path} " f"--packages {kafka_packages} " "pyspark-shell"
         )
 
         logger.info("Configured Spark Submit parameters via PYSPARK_SUBMIT_ARGS.")
 
         # Создание SparkSession
         return (
-            SparkSession.builder.appName("KafkaSparkPipeline")
+            SparkSession.builder.appName("BaseSparkSession")
             .config("spark.jars", mysql_jar_path)
-            .config("spark.sql.streaming.checkpointLocation", self.checkpoint_dir)
             .getOrCreate()
         )
 
     def read_from_mysql(self, table_name: str) -> DataFrame:
+        try:
+            df = (
+                self.spark.read.format("jdbc")
+                .option("url", self.mysql_config.jdbc_url)
+                .option("driver", "com.mysql.cj.jdbc.Driver")
+                .option("dbtable", table_name)
+                .option("user", self.mysql_config.user)
+                .option("password", self.mysql_config.password)
+                .option("partitionColumn", "athlete_id")
+                .option("lowerBound", 1)
+                .option("upperBound", 1000000)
+                .option("numPartitions", 10)
+                .load()
+            )
+            df.show()
+            logger.info("MySQL connection successful!")
+        except Exception as e:
+            logger.error(f"Error connecting to MySQL: {e}")
+
         return (
             self.spark.read.format("jdbc")
             .option("url", self.mysql_config.jdbc_url)
@@ -178,19 +200,25 @@ class SparkProcessor:
         )
 
     def write_to_kafka(self, df: DataFrame, topic: str) -> None:
-        df.select(
-            to_json(struct([col(c) for c in df.columns])).alias("value")
-        ).write.format("kafka").option(
-            "kafka.bootstrap.servers", self.kafka_config.bootstrap_servers
-        ).option(
-            "kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config
-        ).option(
-            "kafka.security.protocol", self.kafka_config.security_protocol
-        ).option(
-            "kafka.sasl.mechanism", self.kafka_config.sasl_mechanism
-        ).option(
-            "topic", topic
-        ).save()
+        logger.info(f"Writing data to Kafka topic: {topic}")
+        try:
+            df.select(
+                to_json(struct([col(c) for c in df.columns])).alias("value")
+            ).write.format("kafka").option(
+                "kafka.bootstrap.servers", self.kafka_config.bootstrap_servers
+            ).option(
+                "kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config
+            ).option(
+                "kafka.security.protocol", self.kafka_config.security_protocol
+            ).option(
+                "kafka.sasl.mechanism", self.kafka_config.sasl_mechanism
+            ).option(
+                "topic", topic
+            ).save()
+            logger.info("Data written to Kafka successfully!")
+        except Exception as e:
+            logger.error(f"Error writing to Kafka: {e}")
+            raise
 
     def process_stream(self):
         input_topic = self.kafka_config.input_topic
@@ -204,23 +232,52 @@ class SparkProcessor:
             ]
         )
 
-        kafka_stream = (
-            self.spark.readStream.format("kafka")
-            .option("kafka.bootstrap.servers", self.kafka_config.bootstrap_servers)
-            .option("subscribe", input_topic)
-            .load()
-        )
+        logger.info(f"Kafka Configurations:")
+        logger.info(f"Bootstrap Servers: {self.kafka_config.bootstrap_servers}")
+        logger.info(f"Input Topic: {self.kafka_config.input_topic}")
+        logger.info(f"Security Protocol: {self.kafka_config.security_protocol}")
+        logger.info(f"SASL Mechanism: {self.kafka_config.sasl_mechanism}")
 
+
+        try:
+            logger.info("Reading data from Kafka...")
+            kafka_stream = (
+                self.spark.readStream.format("kafka")
+                .option("kafka.bootstrap.servers", self.kafka_config.bootstrap_servers)
+                .option("subscribe", input_topic)
+                .load()
+            )
+            logger.info("Kafka stream loaded successfully. Printing schema:")
+            kafka_stream.printSchema()
+        except Exception as e:
+            logger.error(f"Error reading from Kafka: {e}")
+            raise
+
+        logger.info("Parsing Kafka stream...")
         clean_stream = kafka_stream.withColumn(
             "value", regexp_replace(col("value").cast("string"), "\\\\", "")
         ).withColumn("value", regexp_replace(col("value"), '^"|"$', ""))
+        logger.info("Cleaned stream transformation complete.")
 
         parsed_stream = clean_stream.select(
             from_json(col("value"), kafka_schema).alias("data")
         ).select("data.*")
 
-        bio_df = self.read_from_mysql("athlete_bio")
+        logger.info("Parsed stream schema:")
+        parsed_stream.printSchema()
 
+        # Проверка данных
+        logger.info("Writing parsed stream to console for debugging...")
+        query = parsed_stream.writeStream.outputMode("append").format("console").start()
+        query.awaitTermination(10)  # Остановится через 10 секунд для тестирования
+
+        logger.info("Loading bio_df (MySQL table) for join...")
+        bio_df = self.read_from_mysql("athlete_bio")
+        logger.info("Loaded bio_df. Checking schema and count:")
+        bio_df.printSchema()
+        logger.info(f"bio_df count: {bio_df.count()}")
+
+        logger.info("Joining parsed stream with bio_df...")
         aggregated_df = (
             parsed_stream.join(bio_df, "athlete_id")
             .groupBy("sport", "medal")
@@ -230,11 +287,17 @@ class SparkProcessor:
                 current_timestamp().alias("timestamp"),
             )
         )
+        logger.info("Aggregation complete. Printing schema:")
+        aggregated_df.printSchema()
+
+        logger.info("Writing to Kafka...")
 
         def foreach_batch_function(batch_df, epoch_id):
             try:
-                logger.info(f"Processing batch {epoch_id}")
+                logger.info(f"Starting batch processing. Epoch ID: {epoch_id}")
+                logger.info(f"Batch size: {batch_df.count()}")
                 self.write_to_kafka(batch_df, output_topic)
+                logger.info("Batch written to Kafka successfully.")
                 batch_df.write.jdbc(
                     url=self.mysql_config.jdbc_url,
                     table="aggregated_results",
