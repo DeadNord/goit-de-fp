@@ -1,10 +1,13 @@
 import os
-from pyspark.sql import SparkSession
+import logging
+from dataclasses import dataclass
+from typing import List
+from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
-    from_json,
-    col,
     avg,
+    col,
     current_timestamp,
+    from_json,
     to_json,
     struct,
 )
@@ -16,273 +19,197 @@ from pyspark.sql.types import (
     FloatType,
 )
 
-# Доступи до MySQL (Етап 1 - читання даних із MySQL)
-# Абсолютный путь к MySQL JAR
-mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
-if not os.path.exists(mysql_jar_path):
-    raise FileNotFoundError(
-        f"MySQL connector JAR not found at {mysql_jar_path}. "
-        "Please download it using:\n"
-        "wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.32/mysql-connector-j-8.0.32.jar"
-    )
-
-# Установка переменной окружения для Kafka пакетов
-os.environ["PYSPARK_SUBMIT_ARGS"] = (
-    "--packages org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.1,"
-    "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 "
-    "pyspark-shell"
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
-# Создание SparkSession
-spark = (
-    SparkSession.builder.config("spark.jars", mysql_jar_path)
-    .config("spark.driver.extraClassPath", mysql_jar_path)
-    .config("spark.executor.extraClassPath", mysql_jar_path)
-    .config("spark.sql.streaming.checkpointLocation", "./checkpoint")
-    .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
-    .config("spark.driver.memory", "4g")  # Увеличение памяти
-    .config("spark.executor.memory", "4g")
-    .appName("EnhancedJDBCToKafka")
-    .master("local[*]")  # Локальное тестирование
-    .getOrCreate()
-)
-
-# Проверка, что драйвер MySQL загружен
-try:
-    spark.sparkContext._jvm.Class.forName("com.mysql.cj.jdbc.Driver")
-    print("MySQL driver successfully loaded")
-except Exception as e:
-    print(f"Failed to load MySQL driver: {e}")
-    raise
-
-spark.sparkContext.setLogLevel("WARN")
+logger = logging.getLogger(__name__)
 
 
-jdbc_url = "jdbc:mysql://217.61.57.46:3306/olympic_dataset"
-jdbc_user = "neo_data_admin"
-jdbc_password = "Proyahaxuqithab9oplp"
-athlete_bio_table = "athlete_bio"
-athlete_event_table = "athlete_event_results"
+@dataclass
+class KafkaConfig:
+    """Configuration for Kafka connection."""
 
-kafka_bootstrap_servers = "77.81.230.104:9092"
-kafka_sasl_jaas = 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="VawEzo1ikLtrA8Ug8THa";'
-input_topic = "athlete_event_results"
-output_topic = "athlete_enriched"
+    bootstrap_servers: str
+    username: str
+    password: str
+    security_protocol: str
+    sasl_mechanism: str
+    input_topic: str
+    output_topic: str
 
-spark = (
-    SparkSession.builder.appName("EndToEndStreaming_Debug")
-    .config("spark.jars", "mysql-connector-j-8.0.32.jar")
-    .getOrCreate()
-)
+    def log_config(self):
+        """Log Kafka configuration."""
+        logger.info(f"Kafka Bootstrap Servers: {self.bootstrap_servers}")
+        logger.info(f"Kafka Username: {self.username}")
+        logger.info(f"Kafka Input Topic: {self.input_topic}")
+        logger.info(f"Kafka Output Topic: {self.output_topic}")
+        logger.info(f"Kafka Security Protocol: {self.security_protocol}")
+        logger.info(f"Kafka SASL Mechanism: {self.sasl_mechanism}")
 
-spark.sparkContext.setLogLevel("WARN")
-
-print("----- Етап 1: Зчитування біоданих з MySQL -----")
-
-print("Проверка соединения с MySQL:")
-print(f"URL: {jdbc_url}")
-print(f"Таблица: {athlete_bio_table}")
-
-try:
-    spark.sparkContext._jvm.Class.forName("com.mysql.cj.jdbc.Driver")
-    print("MySQL драйвер загружен успешно")
-except Exception as e:
-    print(f"Ошибка загрузки драйвера: {e}")
-
-print("Проверяем доступ к таблице athlete_bio...")
-
-try:
-    df_bio = (
-        spark.read.format("jdbc")
-        .options(
-            url=jdbc_url,
-            driver="com.mysql.cj.jdbc.Driver",
-            dbtable=athlete_bio_table,
-            user=jdbc_user,
-            password=jdbc_password,
-            fetchsize="5000",  # Размер выборки
-            queryTimeout="60",  # Таймаут в секундах
-            numPartitions="10",
+    @property
+    def sasl_jaas_config(self) -> str:
+        return (
+            "org.apache.kafka.common.security.plain.PlainLoginModule required "
+            f'username="{self.username}" password="{self.password}";'
         )
-        .load()
-    )
-    print("Доступ к таблице подтвержден")
-except Exception as e:
-    print(f"Ошибка подключения к MySQL: {e}")
-    raise
-
-df_bio.show(10, truncate=False)
-
-print("----- Перевірка event даних з MySQL -----")
-df_event = (
-    spark.read.format("jdbc")
-    .options(
-        url=jdbc_url,
-        driver="com.mysql.cj.jdbc.Driver",
-        dbtable=athlete_event_table,
-        user=jdbc_user,
-        password=jdbc_password,
-    )
-    .load()
-)
-df_event.show(10, truncate=False)
-
-# Етап 1: Зчитування біоданих (повторне, оскільки надалі працюємо з bio_df)
-bio_df = (
-    spark.read.format("jdbc")
-    .options(
-        url=jdbc_url,
-        driver="com.mysql.cj.jdbc.Driver",
-        dbtable=athlete_bio_table,
-        user=jdbc_user,
-        password=jdbc_password,
-    )
-    .load()
-)
-print("Етап 1: bio_df початковий розмір:", bio_df.count())
-
-# Етап 2: Фільтрація некоректних даних
-bio_df = bio_df.filter((col("height").isNotNull()) & (col("weight").isNotNull()))
-bio_df = bio_df.filter(
-    (col("height").cast("float").isNotNull())
-    & (col("weight").cast("float").isNotNull())
-)
-print("Етап 2: bio_df після фільтрації розмір:", bio_df.count())
-bio_df.show(5, truncate=False)
-
-# Етап 3: Читання athlete_event_results з MySQL та запис у Kafka
-event_df = (
-    spark.read.format("jdbc")
-    .options(
-        url=jdbc_url,
-        driver="com.mysql.cj.jdbc.Driver",
-        dbtable=athlete_event_table,
-        user=jdbc_user,
-        password=jdbc_password,
-    )
-    .load()
-)
-print("Етап 3: event_df розмір:", event_df.count())
-event_df.show(5, truncate=False)
-
-event_json_df = event_df.withColumn(
-    "value", to_json(struct([col(c) for c in event_df.columns]))
-).select("value")
-
-print("Запис event_df у Kafka топік:", input_topic)
-event_json_df.write.format("kafka").option(
-    "kafka.bootstrap.servers", kafka_bootstrap_servers
-).option("kafka.sasl.jaas.config", kafka_sasl_jaas).option(
-    "kafka.security.protocol", "SASL_PLAINTEXT"
-).option(
-    "kafka.sasl.mechanism", "PLAIN"
-).option(
-    "topic", input_topic
-).save()
-
-print("Дані event_df записані у Kafka топік", input_topic)
-
-# Етап 3 (продовження): Зчитування з Kafka-топіку
-schema = StructType(
-    [
-        StructField("athlete_id", IntegerType()),
-        StructField("sport", StringType()),
-        StructField("medal", StringType()),
-    ]
-)
-
-kafka_df = (
-    spark.readStream.format("kafka")
-    .option("kafka.bootstrap.servers", kafka_bootstrap_servers)
-    .option("subscribe", input_topic)
-    .option("kafka.sasl.jaas.config", kafka_sasl_jaas)
-    .option("kafka.security.protocol", "SASL_PLAINTEXT")
-    .option("kafka.sasl.mechanism", "PLAIN")
-    .option("startingOffsets", "earliest")
-    .load()
-)
-
-print("Стримінгове читання з Kafka топіку:", input_topic)
-
-parsed_df = kafka_df.select(
-    from_json(col("value").cast("string"), schema).alias("data")
-).select("data.*")
-
-print("Етап 4: Джоін з bio_df")
-
-joined_df = parsed_df.join(bio_df, "athlete_id")
-
-print("Перед агрегацією, подивимось joined_df у консоль (лише для дебагу):")
-
-debug_query = (
-    joined_df.writeStream.outputMode("append")
-    .format("console")
-    .option("truncate", "false")
-    .start()
-)
-
-# Етап 5: Обчислення середніх значень
-agg_df = (
-    joined_df.groupBy("sport", "medal", "sex", "country_noc")
-    .agg(
-        avg(col("height").cast("float")).alias("avg_height"),
-        avg(col("weight").cast("float")).alias("avg_weight"),
-    )
-    .withColumn("timestamp", current_timestamp())
-)
-
-print("Етап 5: Агрегація готова. Дані будуть записуватись у foreachBatch.")
 
 
-def foreach_batch_function(batch_df, batch_id):
-    if batch_df.isEmpty():
-        print(
-            f"--- foreach_batch_function called for batch_id: {batch_id}, but batch is empty. Skipping. ---"
+@dataclass
+class MySQLConfig:
+    """Configuration for MySQL connection."""
+
+    url: str
+    user: str
+    password: str
+    driver: str = "com.mysql.cj.jdbc.Driver"
+
+    def log_config(self):
+        """Log MySQL configuration."""
+        logger.info(f"MySQL URL: {self.url}")
+        logger.info(f"MySQL User: {self.user}")
+        logger.info(f"MySQL Driver: {self.driver}")
+
+
+class SparkProcessor:
+    def __init__(self):
+        """Initialize SparkProcessor with Kafka and MySQL configurations."""
+        self.kafka_config = self._load_kafka_config()
+        self.mysql_config = self._load_mysql_config()
+
+        # Log all configs for verification
+        logger.info("Loaded Kafka Configuration:")
+        self.kafka_config.log_config()
+
+        logger.info("Loaded MySQL Configuration:")
+        self.mysql_config.log_config()
+
+        self.spark = self._create_spark_session()
+
+    def _load_kafka_config(self) -> KafkaConfig:
+        """Load Kafka configuration from environment variables."""
+        return KafkaConfig(
+            bootstrap_servers=os.getenv(
+                "KAFKA_BOOTSTRAP_SERVERS", "77.81.230.104:9092"
+            ),
+            username=os.getenv("KAFKA_USERNAME", "admin"),
+            password=os.getenv("KAFKA_PASSWORD", "VawEzo1ikLtrA8Ug8THa"),
+            security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT"),
+            sasl_mechanism=os.getenv("KAFKA_SASL_MECHANISM", "PLAIN"),
+            input_topic=os.getenv("KAFKA_INPUT_TOPIC", "athlete_event_results"),
+            output_topic=os.getenv("KAFKA_OUTPUT_TOPIC", "athlete_enriched"),
         )
-        return
 
-    print(f"--- foreach_batch_function called for batch_id: {batch_id} ---")
-    print("Дані batch_df (перші 5 рядків):")
-    batch_df.show(5, truncate=False)
+    def _load_mysql_config(self) -> MySQLConfig:
+        """Load MySQL configuration from environment variables."""
+        host = os.getenv("MYSQL_HOST", "217.61.57.46")
+        port = os.getenv("MYSQL_PORT", "3306")
+        database = os.getenv("MYSQL_DATABASE", "olympic_dataset")
+        return MySQLConfig(
+            url=f"jdbc:mysql://{host}:{port}/{database}",
+            user=os.getenv("MYSQL_USER", "neo_data_admin"),
+            password=os.getenv("MYSQL_PASSWORD", "Proyahaxuqithab9oplp"),
+        )
 
-    # Етап 6(а): Запис у вихідний Kafka-топік з такими ж параметрами SASL/PLAIN
-    print("Запис batch_df у Kafka-топік:", output_topic)
-    out_df = batch_df.select(
-        to_json(struct([col(c) for c in batch_df.columns])).alias("value")
-    )
+    def _create_spark_session(self) -> SparkSession:
+        """Create and configure Spark session."""
+        mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
+        return (
+            SparkSession.builder.appName("RefactoredSparkApp")
+            .config("spark.jars", mysql_jar_path)
+            .config("spark.sql.streaming.checkpointLocation", "./checkpoint")
+            .getOrCreate()
+        )
 
-    out_df.show(5, truncate=False)  # Для дебагу
+    def read_from_mysql(self, table_name: str) -> DataFrame:
+        """Read data from MySQL."""
+        return (
+            self.spark.read.format("jdbc")
+            .options(
+                url=self.mysql_config.url,
+                driver=self.mysql_config.driver,
+                dbtable=table_name,
+                user=self.mysql_config.user,
+                password=self.mysql_config.password,
+            )
+            .load()
+        )
 
-    out_df.write.format("kafka").option(
-        "kafka.bootstrap.servers", kafka_bootstrap_servers
-    ).option("kafka.sasl.jaas.config", kafka_sasl_jaas).option(
-        "kafka.security.protocol", "SASL_PLAINTEXT"
-    ).option(
-        "kafka.sasl.mechanism", "PLAIN"
-    ).option(
-        "topic", output_topic
-    ).save()
-    print("Запис у Kafka топік завершено.")
+    def write_to_kafka(self, df: DataFrame, topic: str) -> None:
+        """Write DataFrame to Kafka."""
+        df.select(
+            to_json(struct([col(c) for c in df.columns])).alias("value")
+        ).write.format("kafka").options(
+            kafka_bootstrap_servers=self.kafka_config.bootstrap_servers,
+            kafka_sasl_jaas_config=self.kafka_config.sasl_jaas_config,
+            kafka_security_protocol=self.kafka_config.security_protocol,
+            kafka_sasl_mechanism=self.kafka_config.sasl_mechanism,
+            topic=topic,
+        ).save()
 
-    # Етап 6(b): Запис у базу даних MySQL
-    print("Запис batch_df у MySQL таблицю avg_stats")
-    batch_df.write.format("jdbc").option("url", jdbc_url).option(
-        "driver", "com.mysql.cj.jdbc.Driver"
-    ).option("dbtable", "avg_stats").option("user", jdbc_user).option(
-        "password", jdbc_password
-    ).mode(
-        "append"
-    ).save()
-    print("Запис у MySQL завершено.")
+    def process_stream(self) -> None:
+        """Main data processing pipeline."""
+        bio_df = self.read_from_mysql("athlete_bio").filter(
+            (col("height").isNotNull()) & (col("weight").isNotNull())
+        )
+        kafka_schema = StructType(
+            [
+                StructField("athlete_id", IntegerType()),
+                StructField("sport", StringType()),
+                StructField("medal", StringType()),
+            ]
+        )
+
+        kafka_stream = (
+            self.spark.readStream.format("kafka")
+            .option("kafka.bootstrap.servers", self.kafka_config.bootstrap_servers)
+            .option("kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config)
+            .option("kafka.security.protocol", self.kafka_config.security_protocol)
+            .option("kafka.sasl.mechanism", self.kafka_config.sasl_mechanism)
+            .option("subscribe", self.kafka_config.input_topic)
+            .load()
+        )
+
+        parsed_stream = kafka_stream.select(
+            from_json(col("value").cast("string"), kafka_schema).alias("data")
+        ).select("data.*")
+
+        joined_df = (
+            parsed_stream.join(bio_df, "athlete_id")
+            .groupBy("sport", "medal")
+            .agg(
+                avg(col("height")).alias("avg_height"),
+                avg(col("weight")).alias("avg_weight"),
+                current_timestamp().alias("timestamp"),
+            )
+        )
+
+        query = (
+            joined_df.writeStream.outputMode("complete")
+            .foreachBatch(self._foreach_batch_function)
+            .start()
+        )
+
+        query.awaitTermination()
+
+    def _foreach_batch_function(self, batch_df: DataFrame, batch_id: int) -> None:
+        """Handle batch processing: write to Kafka and MySQL."""
+        logger.info(f"Processing batch {batch_id}")
+        self.write_to_kafka(batch_df, self.kafka_config.output_topic)
+
+        batch_df.write.format("jdbc").options(
+            url=self.mysql_config.url,
+            driver=self.mysql_config.driver,
+            dbtable="avg_stats",
+            user=self.mysql_config.user,
+            password=self.mysql_config.password,
+        ).mode("append").save()
 
 
-query = (
-    agg_df.writeStream.outputMode("complete")
-    .foreachBatch(foreach_batch_function)
-    .start()
-)
+def main():
+    processor = SparkProcessor()
+    processor.process_stream()
 
-print("Стримінговий запит з foreachBatch запущено. Очікуємо мікробатчі...")
 
-query.awaitTermination()
-debug_query.awaitTermination()
+if __name__ == "__main__":
+    main()
