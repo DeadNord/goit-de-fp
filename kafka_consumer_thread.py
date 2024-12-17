@@ -20,4 +20,4 @@ def kafka_consumer_thread(topic: str, bootstrap_servers: str):
         print(f"Получено сообщение: {message.value}")
 
 if __name__ == "__main__":
-    kafka_consumer_thread("athlete_enriched", "77.81.230.104:9092")
+    kafka_consumer_thread("eod_athlete_enriched", "77.81.230.104:9092")
