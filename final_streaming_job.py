@@ -139,8 +139,8 @@ class SparkProcessor:
 
     def _create_spark_session(self) -> SparkSession:
         """Initialize Spark session with integrated Spark Submit parameters."""
-        mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
-        # mysql_jar_path = os.path.abspath("mysql-connector-j-8.3.0.jar")
+        # mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
+        mysql_jar_path = os.path.abspath("mysql-connector-j-8.3.0.jar")
 
         # Проверка наличия MySQL JAR
         if not os.path.exists(mysql_jar_path):
@@ -201,23 +201,43 @@ class SparkProcessor:
 
     def write_to_kafka(self, df: DataFrame, topic: str) -> None:
         logger.info(f"Writing data to Kafka topic: {topic}")
+        # try:
+        #     df.select(
+        #         to_json(struct([col(c) for c in df.columns])).alias("value")
+        #     ).write.format("kafka").option(
+        #         "kafka.bootstrap.servers", self.kafka_config.bootstrap_servers
+        #     ).option(
+        #         "kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config
+        #     ).option(
+        #         "kafka.security.protocol", self.kafka_config.security_protocol
+        #     ).option(
+        #         "kafka.sasl.mechanism", self.kafka_config.sasl_mechanism
+        #     ).option(
+        #         "topic", topic
+        #     ).save()
+        #     logger.info("Data written to Kafka successfully!")
+        # except Exception as e:
+        #     logger.error(f"Error writing to Kafka: {e}")
+        #     raise
         try:
-            df.select(
-                to_json(struct([col(c) for c in df.columns])).alias("value")
-            ).write.format("kafka").option(
-                "kafka.bootstrap.servers", self.kafka_config.bootstrap_servers
-            ).option(
-                "kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config
-            ).option(
-                "kafka.security.protocol", self.kafka_config.security_protocol
-            ).option(
-                "kafka.sasl.mechanism", self.kafka_config.sasl_mechanism
-            ).option(
-                "topic", topic
-            ).save()
+            (
+                df.selectExpr(
+                    "CAST(NULL AS STRING) AS key", "to_json(struct(*)) AS value"
+                )
+                .write.format("kafka")
+                .option(
+                    "kafka.bootstrap.servers",
+                    ",".join(self.kafka_config.bootstrap_servers),
+                )
+                .option("kafka.security.protocol", self.kafka_config.security_protocol)
+                .option("kafka.sasl.mechanism", self.kafka_config.sasl_mechanism)
+                .option("kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config)
+                .option("topic", topic)
+                .save()
+            )
             logger.info("Data written to Kafka successfully!")
         except Exception as e:
-            logger.error(f"Error writing to Kafka: {e}")
+            logger.error(f"Error writing to Kafka topic {topic}: {str(e)}")
             raise
 
     def process_stream(self):
@@ -226,9 +246,10 @@ class SparkProcessor:
 
         kafka_schema = StructType(
             [
-                StructField("athlete_id", IntegerType()),
-                StructField("sport", StringType()),
-                StructField("medal", StringType()),
+                StructField("athlete_id", IntegerType(), True),
+                StructField("sport", StringType(), True),
+                StructField("medal", StringType(), True),
+                StructField("timestamp", StringType(), True),
             ]
         )
 
@@ -238,13 +259,16 @@ class SparkProcessor:
         logger.info(f"Security Protocol: {self.kafka_config.security_protocol}")
         logger.info(f"SASL Mechanism: {self.kafka_config.sasl_mechanism}")
 
-
         try:
             logger.info("Reading data from Kafka...")
             kafka_stream = (
                 self.spark.readStream.format("kafka")
                 .option("kafka.bootstrap.servers", self.kafka_config.bootstrap_servers)
                 .option("subscribe", input_topic)
+                .option("kafka.request.timeout.ms", "30000")  # Увеличение таймаута
+                .option("kafka.retry.backoff.ms", "500")  # Интервал между попытками
+                .option("kafka.metadata.max.age.ms", "30000")  # Обновление метаданных
+                .option("kafka.session.timeout.ms", "10000")  # Таймаут сессии
                 .load()
             )
             logger.info("Kafka stream loaded successfully. Printing schema:")
