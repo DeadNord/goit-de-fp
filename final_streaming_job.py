@@ -19,12 +19,13 @@ from pyspark.sql.types import (
 )
 from colorama import Fore, Style, init
 from dotenv import load_dotenv
+import shutil
 
 # Загрузить переменные окружения из .env файла
 load_dotenv()
 
 # Initialize colorama
-init(autoreset=True, strip=False, convert=True)
+init(autoreset=True)
 
 
 # Custom formatter for colored logs
@@ -37,17 +38,15 @@ class ColoredFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        color = self.COLORS.get(record.levelname, "")
-        message = super().format(record)
-        return f"{color}{message}{Style.RESET_ALL}"
+        if record.levelname in self.COLORS:
+            record.msg = f"{self.COLORS[record.levelname]}{record.msg}{Style.RESET_ALL}"
+        return super().format(record)
 
 
-# Configure logging
-handler = logging.StreamHandler()
-handler.setFormatter(
-    ColoredFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-)
+# Set up logging
 logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+handler.setFormatter(ColoredFormatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
@@ -107,17 +106,16 @@ class SparkProcessor:
             logger.error(f"Failed to create Spark Session: {e}")
             raise
 
-        # # Clean the checkpoint directory
-        # self._clean_checkpoint_dir()
+        # Clean the checkpoint directory
+        self._clean_checkpoint_dir()
 
-    # def _clean_checkpoint_dir(self):
-    #     """Clean checkpoint directory."""
+    def _clean_checkpoint_dir(self):
+        """Clean checkpoint directory."""
 
-    #     if os.path.exists(self.checkpoint_dir):
-    #         import shutil
+        if os.path.exists(self.checkpoint_dir):
 
-    #         shutil.rmtree(self.checkpoint_dir)
-    #         logger.info(f"Checkpoint directory '{self.checkpoint_dir}' cleared.")
+            shutil.rmtree(self.checkpoint_dir)
+            logger.info(f"Checkpoint directory '{self.checkpoint_dir}' cleared.")
 
     def _load_kafka_config(self) -> KafkaConfig:
         return KafkaConfig(
@@ -154,7 +152,12 @@ class SparkProcessor:
             )
 
         # Интеграция параметров Spark Submit
-        kafka_packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
+        # kafka_packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
+        kafka_packages = (
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
+            "org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.1"
+        )
+
         os.environ["PYSPARK_SUBMIT_ARGS"] = (
             f"--jars {mysql_jar_path} " f"--packages {kafka_packages} " "pyspark-shell"
         )
@@ -299,8 +302,8 @@ class SparkProcessor:
         clean_stream = kafka_stream.withColumn(
             "value", regexp_replace(col("value").cast("string"), "\\\\", "")
         ).withColumn("value", regexp_replace(col("value"), '^"|"$', ""))
-        logger.info("Cleaned stream transformation complete.")
 
+        logger.info("Cleaned stream transformation complete.")
         parsed_stream = clean_stream.select(
             from_json(col("value"), kafka_schema).alias("data")
         ).select("data.*")
@@ -315,6 +318,7 @@ class SparkProcessor:
 
         logger.info("Loading bio_df (MySQL table) for join...")
         bio_df = self.read_from_mysql("athlete_bio")
+
         logger.info("Loaded bio_df. Checking schema and count:")
         bio_df.printSchema()
         logger.info(f"bio_df count: {bio_df.count()}")
@@ -355,13 +359,34 @@ class SparkProcessor:
                 logger.error(f"Error in batch {epoch_id}: {str(e)}")
                 raise
 
-        query = (
-            aggregated_df.writeStream.outputMode("complete")
-            .foreachBatch(foreach_batch_function)
+        # Streaming to console output
+        (
+            aggregated_df.writeStream.outputMode(
+                "complete"
+            )  # Use 'complete' or 'append' depending on requirements
+            .format("console")
+            .option("truncate", "false")  # Full output without truncation
+            .option("numRows", 50)  # Number of rows to display
             .start()
         )
 
-        query.awaitTermination()
+        # query = (
+        #     aggregated_df.writeStream.outputMode("complete")
+        #     .foreachBatch(foreach_batch_function)
+        #     .start()
+        # )
+
+        # query.awaitTermination()
+        # Main streaming logic with foreachBatch
+        (
+            aggregated_df.writeStream.outputMode("complete")
+            .foreachBatch(foreach_batch_function)
+            .option(
+                "checkpointLocation", os.path.join(self.checkpoint_dir, "streaming")
+            )
+            .start()
+            .awaitTermination()
+        )
 
 
 def main():
