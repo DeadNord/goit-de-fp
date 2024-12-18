@@ -88,7 +88,10 @@ class SparkProcessor:
     def __init__(self):
         self.kafka_config = self._load_kafka_config()
         self.mysql_config = self._load_mysql_config()
-        self.checkpoint_dir = "./checkpoint"
+        self.checkpoint_dir = os.getenv("SPARK_CHECKPOINT_DIR", "checkpoint")
+        self.driver_memory = os.getenv("SPARK_DRIVER_MEMORY", "2g")
+        self.executor_memory = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")
+        self.spark_master_url = os.getenv("SPARK_MASTER_URL", "local[*]")
 
         logger.info("Loaded Kafka Configuration:")
         logger.info(vars(self.kafka_config))
@@ -158,6 +161,12 @@ class SparkProcessor:
 
         logger.info("Configured Spark Submit parameters via PYSPARK_SUBMIT_ARGS.")
 
+        logger.info(f"Using MySQL connector JAR: {mysql_jar_path}")
+        logger.info(f"Using Kafka packages: {kafka_packages}")
+        logger.info(f"Spark Master URL: {self.spark_master_url}")
+        logger.info(f"Driver Memory: {self.driver_memory}")
+        logger.info(f"Executor Memory: {self.executor_memory}")
+
         # Создание SparkSession
         return (
             # Create and configure Spark session
@@ -166,12 +175,10 @@ class SparkProcessor:
             .config("spark.executor.extraClassPath", mysql_jar_path)
             .config("spark.sql.streaming.checkpointLocation", self.checkpoint_dir)
             .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
-            .config(
-                "spark.driver.memory", "2g"
-            )  # Increased memory for better performance
-            .config("spark.executor.memory", "2g")
+            .config("spark.driver.memory", self.driver_memory)
+            .config("spark.executor.memory", self.executor_memory)
             .appName("EnhancedJDBCToKafka")
-            .master("local[*]")
+            .master(self.spark_master_url)
             .getOrCreate()
         )
 
@@ -243,7 +250,7 @@ class SparkProcessor:
                 .option("kafka.sasl.mechanism", self.kafka_config.sasl_mechanism)
                 .option("kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config)
                 .option("topic", topic)
-                .option("checkpointLocation", self.checkpoint_dir) \
+                .option("checkpointLocation", self.checkpoint_dir)
                 .save()
             )
             logger.info("Data written to Kafka successfully!")
