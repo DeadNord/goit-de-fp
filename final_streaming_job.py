@@ -264,6 +264,7 @@ class SparkProcessor:
     def process_stream(self):
         input_topic = self.kafka_config.input_topic
         output_topic = self.kafka_config.output_topic
+        topic_prefix = self.kafka_config.topic_prefix
 
         kafka_schema = StructType(
             [
@@ -342,11 +343,11 @@ class SparkProcessor:
             try:
                 logger.info(f"Starting batch processing. Epoch ID: {epoch_id}")
                 logger.info(f"Batch size: {batch_df.count()}")
-                self.write_to_kafka(batch_df, output_topic)
+                self.write_to_kafka(batch_df, f"{topic_prefix}_{output_topic}")
                 logger.info("Batch written to Kafka successfully.")
                 batch_df.write.jdbc(
                     url=self.mysql_config.jdbc_url,
-                    table="aggregated_results",
+                    table=f"{topic_prefix}_{output_topic}",
                     mode="append",
                     properties={
                         "user": self.mysql_config.user,
