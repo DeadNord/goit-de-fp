@@ -88,7 +88,7 @@ class SparkProcessor:
     def __init__(self):
         self.kafka_config = self._load_kafka_config()
         self.mysql_config = self._load_mysql_config()
-        # self.checkpoint_dir = "./checkpoint"
+        self.checkpoint_dir = "./checkpoint"
 
         logger.info("Loaded Kafka Configuration:")
         logger.info(vars(self.kafka_config))
@@ -160,8 +160,18 @@ class SparkProcessor:
 
         # Создание SparkSession
         return (
-            SparkSession.builder.appName("BaseSparkSession")
-            .config("spark.jars", mysql_jar_path)
+            # Create and configure Spark session
+            SparkSession.builder.config("spark.jars", mysql_jar_path)
+            .config("spark.driver.extraClassPath", mysql_jar_path)
+            .config("spark.executor.extraClassPath", mysql_jar_path)
+            .config("spark.sql.streaming.checkpointLocation", self.checkpoint_dir)
+            .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
+            .config(
+                "spark.driver.memory", "2g"
+            )  # Increased memory for better performance
+            .config("spark.executor.memory", "2g")
+            .appName("EnhancedJDBCToKafka")
+            .master("local[*]")
             .getOrCreate()
         )
 
@@ -233,6 +243,7 @@ class SparkProcessor:
                 .option("kafka.sasl.mechanism", self.kafka_config.sasl_mechanism)
                 .option("kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config)
                 .option("topic", topic)
+                .option("checkpointLocation", self.checkpoint_dir) \
                 .save()
             )
             logger.info("Data written to Kafka successfully!")
