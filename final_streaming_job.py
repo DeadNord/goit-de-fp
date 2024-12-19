@@ -140,15 +140,16 @@ class SparkProcessor:
 
     def _create_spark_session(self) -> SparkSession:
         """Initialize Spark session with integrated Spark Submit parameters."""
-        # mysql_jar_path = os.path.abspath("mysql-connector-j-8.0.32.jar")
-        mysql_jar_path = os.path.abspath("mysql-connector-j-8.3.0.jar")
+        # mysql_jar_version = "8.0.32"
+        mysql_jar_version = "8.3.0"
+        mysql_jar_path = os.path.abspath(f"mysql-connector-j-{mysql_jar_version}.jar")
 
         # Проверка наличия MySQL JAR
         if not os.path.exists(mysql_jar_path):
             raise FileNotFoundError(
                 f"MySQL connector JAR not found at {mysql_jar_path}. "
                 "Please download it using:\n"
-                "wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar"
+                f"wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/{mysql_jar_version}/mysql-connector-j-{mysql_jar_version}.jar"
             )
 
         # Интеграция параметров Spark Submit
@@ -170,8 +171,8 @@ class SparkProcessor:
         logger.info(f"Driver Memory: {self.driver_memory}")
         logger.info(f"Executor Memory: {self.executor_memory}")
 
-        # Создание SparkSession
-        return (
+        # Create and configure Spark session
+        spark = (
             # Create and configure Spark session
             SparkSession.builder.config("spark.jars", mysql_jar_path)
             .config("spark.driver.extraClassPath", mysql_jar_path)
@@ -184,6 +185,16 @@ class SparkProcessor:
             .master(self.spark_master_url)
             .getOrCreate()
         )
+
+        # Verify MySQL driver is loaded
+        try:
+            spark.sparkContext._jvm.Class.forName("com.mysql.cj.jdbc.Driver")
+            logger.info(f"MySQL driver {mysql_jar_version} successfully loaded")
+        except Exception as e:
+            logger.error(f"Failed to load MySQL driver: {e}")
+            raise
+
+        return spark
 
     def read_from_mysql(self, table_name: str) -> DataFrame:
         try:
@@ -221,24 +232,7 @@ class SparkProcessor:
 
     def write_to_kafka(self, df: DataFrame, topic: str) -> None:
         logger.info(f"Writing data to Kafka topic: {topic}")
-        # try:
-        #     df.select(
-        #         to_json(struct([col(c) for c in df.columns])).alias("value")
-        #     ).write.format("kafka").option(
-        #         "kafka.bootstrap.servers", self.kafka_config.bootstrap_servers
-        #     ).option(
-        #         "kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config
-        #     ).option(
-        #         "kafka.security.protocol", self.kafka_config.security_protocol
-        #     ).option(
-        #         "kafka.sasl.mechanism", self.kafka_config.sasl_mechanism
-        #     ).option(
-        #         "topic", topic
-        #     ).save()
-        #     logger.info("Data written to Kafka successfully!")
-        # except Exception as e:
-        #     logger.error(f"Error writing to Kafka: {e}")
-        #     raise
+
         try:
             (
                 df.selectExpr(
@@ -371,13 +365,6 @@ class SparkProcessor:
             .start()
         )
 
-        # query = (
-        #     aggregated_df.writeStream.outputMode("complete")
-        #     .foreachBatch(foreach_batch_function)
-        #     .start()
-        # )
-
-        # query.awaitTermination()
         # Main streaming logic with foreachBatch
         (
             aggregated_df.writeStream.outputMode("complete")
