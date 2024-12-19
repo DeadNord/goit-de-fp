@@ -17,21 +17,17 @@ with DAG(
     catchup=False,
 ) as dag:
 
-    # Spark Master для Standalone режима
-    spark_master = "spark://217.61.58.159:7077"
-
     # Задача: landing_to_bronze
     landing_to_bronze = SparkSubmitOperator(
         task_id="landing_to_bronze",
         application="/opt/airflow/dags/landing_to_bronze.py",
-        conn_id=None,
+        conn_id="spark-default",
         name="landing_to_bronze_job",
         verbose=True,
         conf={
-            "spark.master": spark_master,  # Указываем master здесь
-            "spark.executor.memory": "2g",
-            "spark.driver.memory": "2g",
-            "spark.executor.cores": "2",
+            "spark.executor.memory": "4g",
+            "spark.driver.memory": "4g",
+            "spark.executor.cores": "4",
         },
     )
 
@@ -39,14 +35,13 @@ with DAG(
     bronze_to_silver = SparkSubmitOperator(
         task_id="bronze_to_silver",
         application="/opt/airflow/dags/bronze_to_silver.py",
-        conn_id=None,
+        conn_id="spark-default",
         name="bronze_to_silver_job",
         verbose=True,
         conf={
-            "spark.master": spark_master,
-            "spark.executor.memory": "2g",
-            "spark.driver.memory": "2g",
-            "spark.executor.cores": "2",
+            "spark.executor.memory": "4g",
+            "spark.driver.memory": "4g",
+            "spark.executor.cores": "4",
         },
     )
 
@@ -54,14 +49,13 @@ with DAG(
     silver_to_gold = SparkSubmitOperator(
         task_id="silver_to_gold",
         application="/opt/airflow/dags/silver_to_gold.py",
-        conn_id=None,
+        conn_id="spark-default",
         name="silver_to_gold_job",
         verbose=True,
         conf={
-            "spark.master": spark_master,
-            "spark.executor.memory": "2g",
-            "spark.driver.memory": "2g",
-            "spark.executor.cores": "2",
+            "spark.executor.memory": "4g",
+            "spark.driver.memory": "4g",
+            "spark.executor.cores": "4",
         },
     )
 

@@ -12,6 +12,8 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get install -y procps
+
 # Set environment variables for Java
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
