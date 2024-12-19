@@ -1,14 +1,13 @@
 import os
 import logging
 from dataclasses import dataclass
+from typing import List
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
     avg,
     col,
     current_timestamp,
     from_json,
-    to_json,
-    struct,
     regexp_replace,
 )
 from pyspark.sql.types import (
@@ -53,7 +52,7 @@ logger.setLevel(logging.INFO)
 
 @dataclass
 class KafkaConfig:
-    bootstrap_servers: str
+    bootstrap_servers: List[str]
     username: str
     password: str
     security_protocol: str
@@ -119,7 +118,7 @@ class SparkProcessor:
 
     def _load_kafka_config(self) -> KafkaConfig:
         return KafkaConfig(
-            bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+            bootstrap_servers=[os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")],
             username=os.getenv("KAFKA_USERNAME", "admin"),
             password=os.getenv("KAFKA_PASSWORD", "password"),
             security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT"),
@@ -140,7 +139,6 @@ class SparkProcessor:
 
     def _create_spark_session(self) -> SparkSession:
         """Initialize Spark session with integrated Spark Submit parameters."""
-        # mysql_jar_version = "8.0.32"
         mysql_jar_version = "8.3.0"
         mysql_jar_path = os.path.abspath(f"mysql-connector-j-{mysql_jar_version}.jar")
 
@@ -153,7 +151,6 @@ class SparkProcessor:
             )
 
         # Интеграция параметров Spark Submit
-        # kafka_packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
         kafka_packages = (
             "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
             "org.apache.spark:spark-streaming-kafka-0-10_2.12:3.5.1"
@@ -196,7 +193,7 @@ class SparkProcessor:
 
         return spark
 
-    def read_from_mysql(self, table_name: str) -> DataFrame:
+    def read_from_mysql(self, table_name: str, partition_column: str) -> DataFrame:
         try:
             df = (
                 self.spark.read.format("jdbc")
@@ -205,7 +202,7 @@ class SparkProcessor:
                 .option("dbtable", table_name)
                 .option("user", self.mysql_config.user)
                 .option("password", self.mysql_config.password)
-                .option("partitionColumn", "athlete_id")
+                .option("partitionColumn", partition_column)
                 .option("lowerBound", 1)
                 .option("upperBound", 1000000)
                 .option("numPartitions", 10)
@@ -228,6 +225,16 @@ class SparkProcessor:
             .option("upperBound", 1000000)
             .option("numPartitions", 10)
             .load()
+        )
+
+    def _process_athlete_bio(self) -> DataFrame:
+        """Process athlete biography data."""
+        df = self.read_from_mysql("athlete_bio", "athlete_id")
+        return df.filter(
+            (col("height").isNotNull())
+            & (col("weight").isNotNull())
+            & (col("height").cast("double").isNotNull())
+            & (col("weight").cast("double").isNotNull())
         )
 
     def write_to_kafka(self, df: DataFrame, topic: str) -> None:
@@ -255,12 +262,9 @@ class SparkProcessor:
             logger.error(f"Error writing to Kafka topic {topic}: {str(e)}")
             raise
 
-    def process_stream(self):
-        input_topic = self.kafka_config.input_topic
-        output_topic = self.kafka_config.output_topic
-        topic_prefix = self.kafka_config.topic_prefix
-
-        kafka_schema = StructType(
+    def _read_kafka_stream(self, topic: str) -> DataFrame:
+        """Configure and read Kafka stream."""
+        schema = StructType(
             [
                 StructField("athlete_id", IntegerType(), True),
                 StructField("sport", StringType(), True),
@@ -268,6 +272,45 @@ class SparkProcessor:
                 StructField("timestamp", StringType(), True),
             ]
         )
+
+        return (
+            self.spark.readStream.format("kafka")
+            .option(
+                "kafka.bootstrap.servers", ",".join(self.kafka_config.bootstrap_servers)
+            )
+            .option("kafka.security.protocol", self.kafka_config.security_protocol)
+            .option("kafka.sasl.mechanism", self.kafka_config.sasl_mechanism)
+            .option("kafka.sasl.jaas.config", self.kafka_config.sasl_jaas_config)
+            .option("subscribe", topic)
+            .option("startingOffsets", "earliest")
+            .option("maxOffsetsPerTrigger", "5")
+            .option("failOnDataLoss", "false")
+            .load()
+            .withColumn(
+                "value", regexp_replace(col("value").cast("string"), "\\\\", "")
+            )
+            .withColumn("value", regexp_replace(col("value"), '^"|"$', ""))
+            .selectExpr("CAST(value AS STRING)")
+            .select(from_json(col("value"), schema).alias("data"))
+            .select("data.athlete_id", "data.sport", "data.medal")
+        )
+
+    def _aggregate_data(self, stream_df: DataFrame, bio_df: DataFrame) -> DataFrame:
+        """Aggregate streaming data with biography data."""
+        return (
+            stream_df.join(bio_df, "athlete_id")
+            .groupBy("sport", "medal", "sex", "country_noc")
+            .agg(
+                avg("height").alias("avg_height"),
+                avg("weight").alias("avg_weight"),
+                current_timestamp().alias("timestamp"),
+            )
+        )
+
+    def process_stream(self):
+        input_topic = self.kafka_config.input_topic
+        output_topic = self.kafka_config.output_topic
+        topic_prefix = self.kafka_config.topic_prefix
 
         logger.info(f"Kafka Configurations:")
         logger.info(f"Bootstrap Servers: {self.kafka_config.bootstrap_servers}")
@@ -277,62 +320,31 @@ class SparkProcessor:
 
         try:
             logger.info("Reading data from Kafka...")
-            kafka_stream = (
-                self.spark.readStream.format("kafka")
-                .option("kafka.bootstrap.servers", self.kafka_config.bootstrap_servers)
-                .option("subscribe", input_topic)
-                .option("kafka.request.timeout.ms", "30000")  # Увеличение таймаута
-                .option("kafka.retry.backoff.ms", "500")  # Интервал между попытками
-                .option("kafka.metadata.max.age.ms", "30000")  # Обновление метаданных
-                .option("kafka.session.timeout.ms", "10000")  # Таймаут сессии
-                .load()
-            )
+            kafka_stream = self._read_kafka_stream(input_topic)
             logger.info("Kafka stream loaded successfully. Printing schema:")
             kafka_stream.printSchema()
+
+            logger.info("Joining parsed stream with bio_df...")
+            bio_df = self._process_athlete_bio()
+
+            # Process and aggregate data
+            aggregated_df = self._aggregate_data(kafka_stream, bio_df)
+
+            logger.info("Aggregation complete. Printing schema:")
+            aggregated_df.printSchema()
+
+            logger.info("Writing to Kafka...")
+
+            # Start streaming with error handling
+            self._start_streaming(aggregated_df, output_topic, topic_prefix)
+
         except Exception as e:
-            logger.error(f"Error reading from Kafka: {e}")
+            logger.error(f"Error in stream processing: {str(e)}")
             raise
 
-        logger.info("Parsing Kafka stream...")
-        clean_stream = kafka_stream.withColumn(
-            "value", regexp_replace(col("value").cast("string"), "\\\\", "")
-        ).withColumn("value", regexp_replace(col("value"), '^"|"$', ""))
-
-        logger.info("Cleaned stream transformation complete.")
-        parsed_stream = clean_stream.select(
-            from_json(col("value"), kafka_schema).alias("data")
-        ).select("data.*")
-
-        logger.info("Parsed stream schema:")
-        parsed_stream.printSchema()
-
-        # Проверка данных
-        logger.info("Writing parsed stream to console for debugging...")
-        query = parsed_stream.writeStream.outputMode("append").format("console").start()
-        query.awaitTermination(10)  # Остановится через 10 секунд для тестирования
-
-        logger.info("Loading bio_df (MySQL table) for join...")
-        bio_df = self.read_from_mysql("athlete_bio")
-
-        logger.info("Loaded bio_df. Checking schema and count:")
-        bio_df.printSchema()
-        logger.info(f"bio_df count: {bio_df.count()}")
-
-        logger.info("Joining parsed stream with bio_df...")
-        aggregated_df = (
-            parsed_stream.join(bio_df, "athlete_id")
-            .groupBy("sport", "medal")
-            .agg(
-                avg("height").alias("avg_height"),
-                avg("weight").alias("avg_weight"),
-                current_timestamp().alias("timestamp"),
-            )
-        )
-        logger.info("Aggregation complete. Printing schema:")
-        aggregated_df.printSchema()
-
-        logger.info("Writing to Kafka...")
-
+    def _start_streaming(
+        self, df: DataFrame, output_topic: str, topic_prefix: str
+    ) -> None:
         def foreach_batch_function(batch_df, epoch_id):
             try:
                 logger.info(f"Starting batch processing. Epoch ID: {epoch_id}")
@@ -356,7 +368,7 @@ class SparkProcessor:
 
         # Streaming to console output
         (
-            aggregated_df.writeStream.outputMode(
+            df.writeStream.outputMode(
                 "complete"
             )  # Use 'complete' or 'append' depending on requirements
             .format("console")
@@ -367,7 +379,7 @@ class SparkProcessor:
 
         # Main streaming logic with foreachBatch
         (
-            aggregated_df.writeStream.outputMode("complete")
+            df.writeStream.outputMode("complete")
             .foreachBatch(foreach_batch_function)
             .option(
                 "checkpointLocation", os.path.join(self.checkpoint_dir, "streaming")
