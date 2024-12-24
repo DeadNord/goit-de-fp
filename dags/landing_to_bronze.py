@@ -72,9 +72,15 @@ if __name__ == "__main__":
                 .csv(table + ".csv")
             )
 
-            # Show schema and preview data
-            logger.debug(f"Schema of {table}: \n{df.printSchema()}")
-            logger.debug(f"Preview of {table}: \n{df.show(5, truncate=False)}")
+            # Show schema and a few rows to verify
+            logger.info(f"Schema of {table}:")
+            df.printSchema()
+            logger.info(f"Preview of {table}:")
+            df.show(5, truncate=False)
+
+            # Show final 20 rows before writing
+            logger.info(f"Final preview (20 rows) of {table} before writing to Bronze:")
+            df.show(20, truncate=False)
 
             # Write to bronze
             output_path = f"bronze/{table}"

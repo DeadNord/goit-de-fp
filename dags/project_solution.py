@@ -1,6 +1,34 @@
 from datetime import datetime
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+import logging
+from colorama import Fore, Style, init
+
+# Initialize colorama
+init(autoreset=True)
+
+
+# Custom formatter for colored logs
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        "WARNING": Fore.YELLOW,
+        "ERROR": Fore.RED,
+        "INFO": Fore.GREEN,
+        "DEBUG": Fore.BLUE,
+    }
+
+    def format(self, record):
+        if record.levelname in self.COLORS:
+            record.msg = f"{self.COLORS[record.levelname]}{record.msg}{Style.RESET_ALL}"
+        return super().format(record)
+
+
+# Set up logging
+logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+handler.setFormatter(ColoredFormatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # Аргументы по умолчанию
 default_args = {
@@ -23,7 +51,7 @@ with DAG(
         application="/opt/airflow/dags/landing_to_bronze.py",
         conn_id="spark-default",
         name="landing_to_bronze_job",
-        verbose=True,
+        verbose=False,
         conf={
             "spark.executor.memory": "4g",
             "spark.driver.memory": "4g",
@@ -37,7 +65,7 @@ with DAG(
         application="/opt/airflow/dags/bronze_to_silver.py",
         conn_id="spark-default",
         name="bronze_to_silver_job",
-        verbose=True,
+        verbose=False,
         conf={
             "spark.executor.memory": "4g",
             "spark.driver.memory": "4g",
@@ -51,7 +79,7 @@ with DAG(
         application="/opt/airflow/dags/silver_to_gold.py",
         conn_id="spark-default",
         name="silver_to_gold_job",
-        verbose=True,
+        verbose=False,
         conf={
             "spark.executor.memory": "4g",
             "spark.driver.memory": "4g",

@@ -57,6 +57,10 @@ if __name__ == "__main__":
             # Deduplication
             df = df.dropDuplicates()
             logger.info(f"Deduplicated data for table: {table}. Row count after deduplication: {df.count()}")
+            
+             # Show final 20 rows before writing to Silver
+            logger.info(f"Final preview (20 rows) of {table} before writing to Silver:")
+            df.show(20, truncate=False)
 
             # Write to silver
             df.write.mode("overwrite").parquet(f"silver/{table}")
